@@ -634,6 +634,21 @@ namespace PluginCCS {
             }
         }
 
+        public static void OnPropChangingSaveProp(Player p, Level level, ref string value, ref bool cancel){
+            if (value == "" || value == "false") value = "NoPermission";
+            if (value == "true") value = "ScriptOnly";
+
+            if (!(value == "NoPermission" ||
+                value == "ScriptOnly" ||
+                value == "OsScriptGroup" ||
+                value == "Global"
+            )){
+                p.Message("&W\"{0}\" is not a valid input.", value);
+                p.Message("&WValue must be NoPermission, ScriptOnly, OsScriptGroup, or Global");
+                cancel = true;
+            }
+        }
+
         static void CheckPlayerName(string playerName) {
             bool _throw = false;
             try {
@@ -721,8 +736,12 @@ namespace PluginCCS {
 
         public const string savePlayerScriptDataProp = "save_player_script_data";
         static string[] savePlayerScriptDataPropDesc = new string[] {
-            "[true/false]",
-            "Allows OS scripts read and write permanently saved data."
+            "[NoPermission/ScriptOnly/OsScriptGroup/Global]",
+            "Allows OS scripts read and write permanently saved data, to varying different levels.",
+            "NoPermission: Cannot read or write saved data at all (Default).",
+            "ScriptOnly: Can only read and write saved data pertaining to the current script (Backwards compatibility with \"true\").",
+            "OsScriptGroup: Can only read and write saved data pertaining to scripts by the same OS realm owner.",
+            "Global: Can read and write any saved data pertaining to any script (Applies to staff)."
         };
 
         public const string multiPlayerProp = "script_multiplayer";
@@ -733,7 +752,7 @@ namespace PluginCCS {
 
         public override void Load(bool startup) {
             ExtraLevelProps.ExtraLevelProps.Register(name, inputProp, LevelPermission.Operator, inputPropDesc, null);
-            ExtraLevelProps.ExtraLevelProps.Register(name, savePlayerScriptDataProp, LevelPermission.Operator, savePlayerScriptDataPropDesc, ExtraLevelProps.ExtraLevelProps.OnPropChangingBool);
+            ExtraLevelProps.ExtraLevelProps.Register(name, savePlayerScriptDataProp, LevelPermission.Operator, savePlayerScriptDataPropDesc, OnPropChangingSaveProp);
             ExtraLevelProps.ExtraLevelProps.Register(name, multiPlayerProp, LevelPermission.Operator, multiPlayerPropDesc, ExtraLevelProps.ExtraLevelProps.OnPropChangingBool);
 
             Script.PluginLoad();
@@ -1864,9 +1883,9 @@ namespace PluginCCS {
         const int recursiveThreadLimitNormal = 10;
         const int recursiveThreadLimitMax = recursiveThreadLimitNormal * 2;
 
-        public static RunnerPerms Staff = new RunnerPerms(true, true, true, true);
+        public static RunnerPerms Staff = new RunnerPerms("Global", true, true, true);
 
-        public readonly bool canSave;
+        public readonly string savePermission;
         public readonly bool staffPermission;
         public readonly bool canRunMessageBlockRestricted;
         public readonly bool canGiveAwards;
@@ -1879,8 +1898,8 @@ namespace PluginCCS {
         const int newThreadLimitMax = 64;
 
 
-        public RunnerPerms(bool canSave, bool runAsNobody, bool canRunMessageBlockRestricted, bool canGiveAwards) {
-            this.canSave = canSave;
+        public RunnerPerms(string savePermission, bool runAsNobody, bool canRunMessageBlockRestricted, bool canGiveAwards) {
+            this.savePermission = savePermission;
             this.staffPermission = runAsNobody;
             this.canRunMessageBlockRestricted = canRunMessageBlockRestricted;
             this.canGiveAwards = canGiveAwards;
@@ -1896,7 +1915,9 @@ namespace PluginCCS {
         /// Generates the appropriate non-staff permissions for the given level. E.g. may allow saving via extra level prop
         /// </summary>
         public RunnerPerms(Level lvl) {
-            canSave = lvl.GetExtraPropBool(Core.savePlayerScriptDataProp);
+            savePermission = lvl.GetExtraPropString(Core.savePlayerScriptDataProp);
+            if (savePermission == "" || savePermission == "false") { savePermission = "NoPermission"; };
+            if (savePermission == "true") { savePermission = "ScriptOnly"; };
 
             actionLimit = staffPermission ? actionsMax : actionsNormal;
             recursiveThreadLimit = staffPermission ? recursiveThreadLimitMax : recursiveThreadLimitNormal;
@@ -3840,12 +3861,12 @@ namespace PluginCCS {
                     return;
                 }
                 if (run.cmdName.CaselessStarts("items")) {
-                    if (run.perms.canSave) { run.Error("Cannot reset items in non-os script"); return; }
+                    if (run.perms.savePermission != "NoPermission") { run.Error("Cannot reset items in non-os script"); return; }
                     run.scriptData.Reset(false, true, run.cmdArgs);
                     return;
                 }
                 if (run.cmdName.CaselessStarts("saved")) {
-                    if (!run.perms.canSave) { run.Error("Cannot reset saved packages in os script"); return; }
+                    if (run.perms.savePermission == "NoPermission") { run.Error("Cannot reset saved packages in os script"); return; }
                     run.scriptData.ResetSavedStrings(run.scriptName, run.cmdArgs);
                     return;
                 }
@@ -5875,7 +5896,7 @@ namespace PluginCCS {
         }
     }
 
-
+    /*
     public interface IScriptData {
         public Dictionary<string, string> GetPackages();
 
@@ -5888,7 +5909,25 @@ namespace PluginCCS {
                 return all;
             }
         }
+    }*/
+
+    // I have no idea if this still works by the way. Using interfaces the way above requires C# 8.0 whereas MCGalaxy requires C# 4.0
+    public interface IScriptData {
+        Dictionary<string, string> GetPackages();
     }
+
+    public static class IScriptDataOriginal{
+        public static Dictionary<string, string> GetPackages(Dictionary<string, string> values, object packagesLocker) {
+            lock (packagesLocker) {
+                Dictionary<string, string> all = new Dictionary<string, string>();
+                foreach (var pair in values) {
+                    all[pair.Key] = pair.Value;
+                }
+                return all;
+            }
+        }
+    }
+
     /// <summary>
     /// Distinct from ScriptData for the purposes of loading data of an offline player.
     /// </summary>
@@ -5899,7 +5938,7 @@ namespace PluginCCS {
         public Dictionary<string, string> GetPackages() {
             //This class may be initialised outside of ScriptData, in which case it will not have an assigned packagesLocker object
             if (packagesLocker == null) packagesLocker = new object();
-            return IScriptData.GetPackages(values, packagesLocker);
+            return IScriptDataOriginal.GetPackages(values, packagesLocker);
         }
 
         internal readonly Dictionary<string, string> values = new Dictionary<string, string>();
@@ -5975,7 +6014,7 @@ namespace PluginCCS {
     public class ScriptData : IScriptData {
 
         public Dictionary<string, string> GetPackages() {
-            return IScriptData.GetPackages(strings, packagesLocker);
+            return IScriptDataOriginal.GetPackages(strings, packagesLocker);
         }
 
         public const string savedMarker = ".";
@@ -5990,7 +6029,6 @@ namespace PluginCCS {
         public SevGroup clickEvents = new SevGroup();
         public SevGroup chatEvents = new SevGroup();
         public SevGroup zoneChangedEvents = new SevGroup();
-
 
         public string prevModel = null;
         //If this isn't null, it means changeskin action was used
@@ -6143,15 +6181,27 @@ namespace PluginCCS {
             saved = false;
             stringName = stringName.ToUpper();
             scriptName = scriptName.ToUpper();
-            if (!perms.canSave) { return stringName; }
+            if (perms.savePermission == "NoPermission") { return stringName; }
             if (!stringName.EndsWith(savedMarker)) { return stringName; }
 
             saved = true;
 
+            // Basic script saving permissions, staff bypasses this even if set to this
+            if (perms.savePermission == "ScriptOnly" && !perms.staffPermission) {
+                return (SavedScriptData.prefixedMarker + scriptName + "_" + stringName);
+            }
+
             if (stringName.StartsWith(SavedScriptData.prefixedMarker)) {
-                // If script isn't ran as staff permission (/script), it cannot read or write saved packages belonging to other scripts
-                if (!perms.staffPermission) { saved = false; }
-                return stringName;
+                // Global permission or staff can write or save packages belonging to any other script
+                if (perms.savePermission == "Global" || perms.staffPermission) { return stringName; }
+
+                if (perms.savePermission == "OsScriptGroup") {
+                    // If the script name is something like os/goodlyay+heart, check if the variable starts with @os/goodlyay+
+                    if (stringName.StartsWith(SavedScriptData.prefixedMarker + scriptName.Split('+')[0] + "+")) { return stringName; }
+                    return (SavedScriptData.prefixedMarker + scriptName + "_" + stringName);
+                }
+
+                // This code should be unreachable
             }
 
             return (SavedScriptData.prefixedMarker + scriptName + "_" + stringName);
@@ -6181,9 +6231,9 @@ namespace PluginCCS {
         }
 
 
-        public bool HasItem(string itemName, RunnerPerms perms) { return !perms.canSave ? OsHasItem(itemName) : ModHasItem(itemName); }
-        public void GiveItem(string itemName, RunnerPerms perms) { if (!perms.canSave) { OsGiveItem(itemName); } else { ModGiveItem(itemName); } }
-        public void TakeItem(string itemName, RunnerPerms perms) { if (!perms.canSave) { OsTakeItem(itemName); } else { ModTakeItem(itemName); } }
+        public bool HasItem(string itemName, RunnerPerms perms) { return (perms.savePermission == "NoPermission") ? OsHasItem(itemName) : ModHasItem(itemName); }
+        public void GiveItem(string itemName, RunnerPerms perms) { if (perms.savePermission == "NoPermission") { OsGiveItem(itemName); } else { ModGiveItem(itemName); } }
+        public void TakeItem(string itemName, RunnerPerms perms) { if (perms.savePermission == "NoPermission") { OsTakeItem(itemName); } else { ModTakeItem(itemName); } }
 
         private bool ModHasItem(string itemName) {
             try {
